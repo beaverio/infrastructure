@@ -166,11 +166,11 @@ Each service will have its own Dockerfile and be built/managed individually thro
 **Service Structure:**
 ```
 services/
-├── bff-web/
+├── auth-gateway/
 │   ├── Dockerfile
 │   ├── src/
 │   └── application-local.yml
-├── gateway/
+├── internal-gateway/
 │   ├── Dockerfile
 │   ├── src/
 │   └── application-local.yml
@@ -215,7 +215,7 @@ spring:
           issuer-uri: http://keycloak:8090/realms/dev
 
 # Internal service discovery
-gateway:
+internal-gateway:
   url: http://internal-gateway:8081
 ```
 
@@ -231,8 +231,8 @@ These will be standalone Docker containers you start manually:
 
 ### Application Services (IntelliJ)
 These will be Spring Boot applications managed through IntelliJ Services:
-- **bff-web** - Built from Dockerfile, exposed port 8080:8080
-- **gateway** - Built from Dockerfile, internal port 8081
+- **auth-gateway** - Built from Dockerfile, exposed port 8080:8080
+- **internal-gateway** - Built from Dockerfile, internal port 8081
 - **identity-service** - Built from Dockerfile, internal port 8082
 - **transactions-service** - Built from Dockerfile, internal port 8083
 
@@ -273,10 +273,10 @@ docker run -d --name keycloak --network beaver-network \
 3. **Network Configuration**: Ensure all services join the `beaver-network`
 4. **Start Order**: Start services in dependency order:
    - Infrastructure containers (already running)
-   - **gateway** (internal routing)
+   - **internal-gateway** (internal routing)
    - **identity-service** (user context)
    - **transactions-service** (business logic)
-   - **bff-web** (public endpoint)
+   - **auth-gateway** (public endpoint)
 
 ### 3. Access and Testing
 - **Application Access**: http://localhost:8080 (Auth Gateway only)
@@ -289,3 +289,58 @@ docker run -d --name keycloak --network beaver-network \
 2. **Hot Reload**: Services rebuild automatically on file changes
 3. **Service Restart**: Use IntelliJ Services to restart individual containers
 4. **Network Communication**: Services discover each other via Docker DNS
+
+## Production Deployment Strategy
+
+### Container Registry
+```bash
+# Build and tag images for production
+docker build -t beaver/auth-gateway:latest services/auth-gateway/
+docker build -t beaver/internal-gateway:latest services/internal-gateway/
+docker build -t beaver/identity-service:latest services/identity-service/
+docker build -t beaver/transactions-service:latest services/transactions-service/
+```
+
+### Docker Compose (Optional Alternative)
+For teams preferring compose over IntelliJ Services:
+```yaml
+version: '3.8'
+services:
+  auth-gateway:
+    build: ./services/auth-gateway
+    ports:
+      - "8080:8080"
+    networks:
+      - beaver-network
+    depends_on:
+      - auth-redis
+      - keycloak
+      - internal-gateway
+  
+  internal-gateway:
+    build: ./services/internal-gateway
+    networks:
+      - beaver-network
+    depends_on:
+      - identity-service
+      - transactions-service
+  
+  # ...other services
+
+networks:
+  beaver-network:
+    driver: bridge
+```
+
+### Cloud Migration Path
+Your Docker setup maps directly to cloud services:
+
+**AWS ECS:**
+```
+ALB → Auth Gateway (ECS Task) → Internal ALB → Services (ECS Tasks) → RDS
+```
+
+**Kubernetes:**
+```
+Ingress → Auth Gateway (Pod) → Service Mesh → Services (Pods) → PostgreSQL
+```
