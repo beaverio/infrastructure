@@ -24,10 +24,16 @@ This document describes the end‑to‑end authentication & authorization flow f
 
 ## Networks & Deployment Topology
 
-Two networks:
+**Single Private Network:**
+- All containers run in one private Docker network
+- Only BFF exposed to host machine (8080:8080) for development
+- Internal service communication via container DNS names
+- No external access to internal services (Gateway, Keycloak, Services, Databases)
 
-- **frontnet (public edge):** BFF (public endpoint) and Keycloak endpoints.
-- **backnet (private):** Gateway, all services, Redis, Postgres.
+**Local Development Setup:**
+- BFF accessible at `http://localhost:8080` (only exposed service)
+- All other containers communicate internally via private network
+- Simplified networking for development efficiency
 
 **Keycloak:** one instance per environment (dev/test/prod), each with its own DB, issuer URL, clients, secrets.
 
@@ -51,7 +57,7 @@ sequenceDiagram
     participant P as PostgreSQL
 
     Note over C,P: Login & Token Exchange Flow
-    
+
     C->>B: GET /app (no session)
     B->>K: Redirect to Keycloak OIDC
     K->>C: Login form
@@ -62,7 +68,7 @@ sequenceDiagram
     
     Note over B,I: Get User Context from Identity Service
     B->>G: GET /identity/users/me (Bearer: access_token)
-    G->>I: Forward request with JWT
+    G->I: Forward request with JWT
     I->>P: SELECT user, lastWorkspaceId, roles FROM users WHERE id = jwt.sub
     P->>I: User data with workspace context
     I->>G: User profile + lastWorkspaceId + roles
