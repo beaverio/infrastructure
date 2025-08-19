@@ -104,14 +104,14 @@ Client Request (🍪 session cookie)
 │  4. Forward request to Internal Gateway  │
 └─────────────────────────────────────────┘
     ↓ (🎟️ JWT Bearer token)
-┌─────────────────────────────────────────┐
+┌────────────────────���────────────────────┐
 │         Internal Gateway :8081         │
 │       Service Router                   │
 │                                         │
 │  1. Validate JWT token                  │
 │  2. Route by path pattern               │
 │  3. Forward to appropriate service      │
-└─────────────────────────────────────────┘
+└─────���───────────────────────────────────┘
     ↓ (🎟️ Forward JWT unchanged)
 ┌─────────────────────────────────────────┐
 │    Microservices :8082, :8083, etc.    │
@@ -168,6 +168,7 @@ Each service will have its own Dockerfile and be built/managed individually thro
 services/
 ├── auth-gateway/
 │   ├── Dockerfile
+│   ├── docker-compose.local.yml
 │   ├── src/
 │   └── application-local.yml
 ├── internal-gateway/
@@ -176,26 +177,168 @@ services/
 │   └── application-local.yml
 ├── identity-service/
 │   ├── Dockerfile
+│   ├── docker-compose.local.yml
 │   ├── src/
 │   └── application-local.yml
-└── transactions-service/
+├── transactions-service/
+│   ├── Dockerfile
+│   ├── docker-compose.local.yml
+│   ├── src/
+│   └── application-local.yml
+└── keycloak/
     ├── Dockerfile
-    ├── src/
-    └── application-local.yml
+    ├── docker-compose.local.yml
+    ├── realm-config/
+    │   ├── dev-realm.json
+    │   └── client-configs.json
+    └── themes/ (optional custom themes)
+```
+
+### Local Development Database Strategy
+Each service manages its own PostgreSQL database via Docker Compose:
+
+**Example: `identity-service/docker-compose.local.yml`**
+```yaml
+version: '3.8'
+services:
+  identity-db:
+    image: postgres:16
+    container_name: identity-db
+    environment:
+      POSTGRES_DB: identity_db
+      POSTGRES_USER: identity_user
+      POSTGRES_PASSWORD: identity_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - identity_db_data:/var/lib/postgresql/data
+    networks:
+      - beaver-network
+
+volumes:
+  identity_db_data:
+
+networks:
+  beaver-network:
+    external: true
+```
+
+**Example: `transactions-service/docker-compose.local.yml`**
+```yaml
+version: '3.8'
+services:
+  transactions-db:
+    image: postgres:16
+    container_name: transactions-db
+    environment:
+      POSTGRES_DB: transactions_db
+      POSTGRES_USER: transactions_user
+      POSTGRES_PASSWORD: transactions_password
+    ports:
+      - "5435:5432"
+    volumes:
+      - transactions_db_data:/var/lib/postgresql/data
+    networks:
+      - beaver-network
+
+volumes:
+  transactions_db_data:
+
+networks:
+  beaver-network:
+    external: true
+```
+
+**Example: `auth-gateway/docker-compose.local.yml`**
+```yaml
+version: '3.8'
+services:
+  auth-redis:
+    image: redis:7-alpine
+    container_name: auth-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - beaver-network
+
+networks:
+  beaver-network:
+    external: true
+```
+
+**Example: `keycloak/docker-compose.local.yml`**
+```yaml
+version: '3.8'
+services:
+  keycloak-db:
+    image: postgres:16
+    container_name: keycloak-db
+    environment:
+      POSTGRES_DB: keycloak_dev
+      POSTGRES_USER: keycloak_user
+      POSTGRES_PASSWORD: keycloak_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    networks:
+      - beaver-network
+
+  keycloak:
+    build: .
+    container_name: keycloak
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak_dev
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: keycloak_password
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin_password
+      KC_HTTP_PORT: 8080
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./realm-config:/opt/keycloak/data/import
+    command: ["start-dev", "--import-realm"]
+    depends_on:
+      - keycloak-db
+    networks:
+      - beaver-network
+
+volumes:
+  keycloak_db_data:
+
+networks:
+  beaver-network:
+    external: true
+```
+
+**Example: `keycloak/Dockerfile`**
+```dockerfile
+FROM quay.io/keycloak/keycloak:25.0
+
+# Copy custom realm configurations
+COPY realm-config/ /opt/keycloak/data/import/
+
+# Copy custom themes (if any)
+COPY themes/ /opt/keycloak/themes/
+
+# Set production optimizations (optional for local dev)
+# RUN /opt/keycloak/bin/kc.sh build
 ```
 
 ### Environment Variables Strategy
 Each service uses Spring Boot profiles and environment-specific configuration:
-- `application-local.yml` - Local development configuration
+- `application-local.yml` - Local development configuration  
 - `application-test.yml` - Testing environment
 - `application-prod.yml` - Production (not in repo)
 
 **Example service configuration patterns:**
 ```yaml
-# Database connection (each service has dedicated DB)
+# Database connection (each service connects to its own local DB)
 spring:
   datasource:
-    url: jdbc:postgresql://identity-db:5434/identity_db
+    url: jdbc:postgresql://localhost:5434/identity_db  # Local port mapping
     username: identity_user
     password: identity_password
 
@@ -204,7 +347,7 @@ spring:
     store-type: redis
   data:
     redis:
-      host: auth-redis
+      host: localhost  # Local Redis via compose
       port: 6379
 
 # Keycloak configuration
@@ -212,22 +355,22 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: http://keycloak:8090/realms/dev
+          issuer-uri: http://localhost:8090/realms/dev  # Local Keycloak
 
-# Internal service discovery
+# Internal service discovery (for containerized deployment)
 internal-gateway:
-  url: http://internal-gateway:8081
+  url: http://internal-gateway:8081  # Container-to-container communication
 ```
-
+````markdown
 ## IntelliJ Services Management
 
-### Infrastructure Containers (Docker)
-These will be standalone Docker containers you start manually:
-- **keycloak** - Authentication server (port 8090:8080)
-- **keycloak-db** - PostgreSQL for Keycloak (port 5433:5432)
-- **auth-redis** - Session storage for Auth Gateway (port 6379:6379)
-- **identity-db** - PostgreSQL for Identity service (port 5434:5432)
-- **transactions-db** - PostgreSQL for Transactions service (port 5435:5432)
+### Service-Specific Infrastructure (Docker Compose)
+Each service manages its own dependencies via `docker-compose.local.yml`:
+- **keycloak** - Starts `keycloak` + `keycloak-db` (ports 8090:8080, 5433:5432)
+- **auth-gateway** - Starts `auth-redis` (port 6379:6379)
+- **identity-service** - Starts `identity-db` (port 5434:5432)
+- **transactions-service** - Starts `transactions-db` (port 5435:5432)
+- **internal-gateway** - No database dependencies
 
 ### Application Services (IntelliJ)
 These will be Spring Boot applications managed through IntelliJ Services:
@@ -238,109 +381,96 @@ These will be Spring Boot applications managed through IntelliJ Services:
 
 ## Development Workflow
 
-### 1. Start Infrastructure Containers (Manual Docker Commands)
-Start the required infrastructure containers first:
+### 1. Create Shared Network (One Time Setup)
 ```bash
-# Create custom Docker network
+# Create the shared Docker network that all services will use
 docker network create beaver-network
-
-# Start databases and cache
-docker run -d --name keycloak-db --network beaver-network \
-  -e POSTGRES_DB=keycloak_dev -e POSTGRES_USER=keycloak_user -e POSTGRES_PASSWORD=keycloak_password \
-  -p 5433:5432 postgres:16
-
-docker run -d --name identity-db --network beaver-network \
-  -e POSTGRES_DB=identity_db -e POSTGRES_USER=identity_user -e POSTGRES_PASSWORD=identity_password \
-  -p 5434:5432 postgres:16
-
-docker run -d --name transactions-db --network beaver-network \
-  -e POSTGRES_DB=transactions_db -e POSTGRES_USER=transactions_user -e POSTGRES_PASSWORD=transactions_password \
-  -p 5435:5432 postgres:16
-
-docker run -d --name auth-redis --network beaver-network \
-  -p 6379:6379 redis:7-alpine
-
-docker run -d --name keycloak --network beaver-network \
-  -e KC_DB=postgres -e KC_DB_URL=jdbc:postgresql://keycloak-db:5432/keycloak_dev \
-  -e KC_DB_USERNAME=keycloak_user -e KC_DB_PASSWORD=keycloak_password \
-  -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin_password \
-  -p 8090:8080 quay.io/keycloak/keycloak:25.0 start-dev
 ```
 
-### 2. Build and Run Services via IntelliJ Services
+### 2. Start Service Infrastructure
+Each developer starts their required infrastructure via Docker Compose:
+
+**For Keycloak (Shared Auth Infrastructure):**
+```bash
+cd services/keycloak/
+docker-compose -f docker-compose.local.yml up -d
+# This starts both keycloak-db and keycloak with realm import
+```
+
+**For Identity Service:**
+```bash
+cd services/identity-service/
+docker-compose -f docker-compose.local.yml up -d
+```
+
+**For Transactions Service:**
+```bash
+cd services/transactions-service/
+docker-compose -f docker-compose.local.yml up -d
+```
+
+**For Auth Gateway:**
+```bash
+cd services/auth-gateway/
+docker-compose -f docker-compose.local.yml up -d
+```
+
+### 3. Run Services via IntelliJ Services
 1. **Configure IntelliJ Services**: Add each service to IntelliJ's Services panel
 2. **Build Dockerfiles**: Each service builds from its individual Dockerfile
 3. **Network Configuration**: Ensure all services join the `beaver-network`
 4. **Start Order**: Start services in dependency order:
-   - Infrastructure containers (already running)
+   - **keycloak** (authentication provider - step 2)
+   - Service databases (step 2)
    - **internal-gateway** (internal routing)
    - **identity-service** (user context)
    - **transactions-service** (business logic)
    - **auth-gateway** (public endpoint)
 
-### 3. Access and Testing
-- **Application Access**: http://localhost:8080 (Auth Gateway only)
-- **API Testing**: Use Postman/curl against Auth Gateway endpoints
-- **Database Access**: Connect via exposed ports for development (5433, 5434, 5435)
-- **Service Logs**: Monitor via IntelliJ Services panel
+### 4. Development Benefits
+**Environment Consistency:**
+- Each environment (dev, staging, prod) has its own Keycloak instance with specific realm configurations
+- Keycloak realm configurations are version-controlled and automatically imported
+- Custom themes and branding per environment
 
-### 4. Development Cycle
-1. **Code Changes**: Edit source code in IntelliJ
-2. **Hot Reload**: Services rebuild automatically on file changes
-3. **Service Restart**: Use IntelliJ Services to restart individual containers
-4. **Network Communication**: Services discover each other via Docker DNS
+**Per-Service Autonomy:**
+- Each team can manage their own database schema migrations
+- Independent database versions and configurations
+- Isolated data for testing without affecting other services
+- Keycloak configurations managed separately from application services
 
-## Production Deployment Strategy
+### 5. Environment-Specific Keycloak Configuration
 
-### Container Registry
+**Development Environment:**
 ```bash
-# Build and tag images for production
-docker build -t beaver/auth-gateway:latest services/auth-gateway/
-docker build -t beaver/internal-gateway:latest services/internal-gateway/
-docker build -t beaver/identity-service:latest services/identity-service/
-docker build -t beaver/transactions-service:latest services/transactions-service/
+# services/keycloak/realm-config/dev-realm.json
+{
+  "realm": "dev",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "beaver-auth-gateway",
+      "rootUrl": "http://localhost:8080",
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:3000", "http://localhost:8080"]
+    }
+  ]
+}
 ```
 
-### Docker Compose (Optional Alternative)
-For teams preferring compose over IntelliJ Services:
-```yaml
-version: '3.8'
-services:
-  auth-gateway:
-    build: ./services/auth-gateway
-    ports:
-      - "8080:8080"
-    networks:
-      - beaver-network
-    depends_on:
-      - auth-redis
-      - keycloak
-      - internal-gateway
-  
-  internal-gateway:
-    build: ./services/internal-gateway
-    networks:
-      - beaver-network
-    depends_on:
-      - identity-service
-      - transactions-service
-  
-  # ...other services
-
-networks:
-  beaver-network:
-    driver: bridge
-```
-
-### Cloud Migration Path
-Your Docker setup maps directly to cloud services:
-
-**AWS ECS:**
-```
-ALB → Auth Gateway (ECS Task) → Internal ALB → Services (ECS Tasks) → RDS
-```
-
-**Kubernetes:**
-```
-Ingress → Auth Gateway (Pod) → Service Mesh → Services (Pods) → PostgreSQL
+**Staging Environment:**
+```bash
+# services/keycloak/realm-config/staging-realm.json  
+{
+  "realm": "staging",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "beaver-auth-gateway", 
+      "rootUrl": "https://staging.yourapp.com",
+      "redirectUris": ["https://staging.yourapp.com/*"],
+      "webOrigins": ["https://staging.yourapp.com"]
+    }
+  ]
+}
 ```
