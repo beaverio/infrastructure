@@ -12,30 +12,30 @@ graph LR
     end
     
     subgraph "Private Container Network"
-        BFF["🛡️ bff-web<br/>8080:8080<br/>EXPOSED FOR DEVELOPMENT"]
+        AuthGateway["🔐 auth-gateway<br/>8080:8080<br/>EXPOSED FOR DEVELOPMENT"]
         
         Keycloak[🔐 keycloak<br/>8090:8080]
         KeycloakDB[(🗄️ keycloak-db<br/>5433:5432<br/>PostgreSQL)]
-        BFFRedis[(📦 bff-redis<br/>6379:6379)]
-        
-        Gateway[🚪 gateway<br/>:8081<br/>INTERNAL ONLY]
-        
+        AuthRedis[(📦 auth-redis<br/>6379:6379)]
+
+        InternalGateway[🚪 internal-gateway<br/>:8081<br/>INTERNAL ONLY]
+
         Identity[👤 identity-service<br/>:8082<br/>INTERNAL ONLY]
         Transactions[💰 transactions-service<br/>:8083<br/>INTERNAL ONLY]
-        
+
         IdentityDB[(🗄️ identity-db<br/>5434:5432<br/>PostgreSQL)]
         TransactionsDB[(🗄️ transactions-db<br/>5435:5432<br/>PostgreSQL)]
     end
     
-    Browsers --> BFF
-    DevTools --> BFF
+    Browsers --> AuthGateway
+    DevTools --> AuthGateway
     
-    BFF --> Keycloak
-    BFF --> Gateway
-    BFF --> BFFRedis
+    AuthGateway --> Keycloak
+    AuthGateway --> InternalGateway
+    AuthGateway --> AuthRedis
     
-    Gateway --> Identity
-    Gateway --> Transactions
+    InternalGateway --> Identity
+    InternalGateway --> Transactions
     
     Identity --> IdentityDB
     Transactions --> TransactionsDB
@@ -43,19 +43,19 @@ graph LR
     Keycloak --> KeycloakDB
     
     classDef internet fill:#ffebee,color:#c62828
-    classDef bff fill:#e3f2fd,color:#1565c0
+    classDef auth fill:#e8f5e8,color:#2e7d32
     classDef internal fill:#fff3e0,color:#e65100
     classDef database fill:#bbdefb,color:#0d47a1
     classDef cache fill:#ffcdd2,color:#b71c1c
     
     class Browsers,DevTools internet
-    class BFF bff
-    class Keycloak,Gateway,Identity,Transactions internal
+    class AuthGateway auth
+    class Keycloak,InternalGateway,Identity,Transactions internal
     class IdentityDB,TransactionsDB,KeycloakDB database
-    class BFFRedis cache
+    class AuthRedis cache
 ```
 
-## Network Security (Cloud-Native Architecture)
+## Network Security (Authentication Gateway Architecture)
 
 ### Single Private Network
 - **Docker**: All containers run in one custom Docker bridge network with internal DNS resolution
@@ -64,53 +64,99 @@ graph LR
 - **DNS resolution**: Containers communicate using container names (e.g., `http://keycloak:8090`)
 (AWS equivalent: VPC with private subnets)
 
-### BFF (Only Public Service)
+### Auth Gateway (Authentication Orchestration Layer)
 - **Docker**: Single container with published port mapping `8080:8080` to host machine
 - **External access**: Only this container is reachable from outside Docker network
-- **Internal communication**: BFF connects to other containers via internal network using container names
+- **Authentication role**: Converts session cookies to JWT tokens and manages auth state
+- **Pass-through pattern**: Forwards authenticated requests to Internal Gateway
 - **Session management**: Uses Redis container for distributed session storage
+- **Auth boundary**: Separates public authentication (cookies) from private authentication (JWT)
 (AWS equivalent: Application Load Balancer + ECS Task in public subnet)
 
-### All Other Services (Private)
+### Internal Gateway (Service Routing Hub)
+- **Docker**: Container with no published ports - internal access only via `internal-gateway:8081`
+- **Routing responsibility**: Receives JWT-authenticated requests from Auth Gateway and routes to services
+- **Service discovery**: Uses Docker DNS to forward requests to `identity:8082`, `transactions:8083`, etc.
+- **Token validation**: Validates JWT tokens before forwarding to downstream services
+- **Path-based routing**: Routes based on URL patterns (e.g., `/identity/*` → Identity Service)
+
+### Business Services (Private Microservices)
 - **Docker**: Containers with no published ports - only accessible within Docker network
 - **Service discovery**: Containers find each other using Docker's built-in DNS (container names)
 - **Database isolation**: Each service has dedicated PostgreSQL container with unique internal port
+- **JWT consumption**: Services receive validated JWT tokens with user/workspace context
 - **Network segmentation**: Cannot be accessed from host machine or external networks
 (AWS equivalent: ECS Tasks in private subnets + RDS instances + ElastiCache)
+
+## Request Flow Architecture
+
+### Client Request Journey
+```
+Client Request (🍪 session cookie)
+    ↓
+┌─────────────────────────────────────────┐
+│           Auth Gateway :8080          │
+│    Authentication Orchestrator         │
+│                                         │
+│  1. Extract session from Redis          │
+│  2. Get JWT from session                │
+│  3. Add Authorization header            │
+│  4. Forward request to Internal Gateway  │
+└─────────────────────────────────────────┘
+    ↓ (🎟️ JWT Bearer token)
+┌─────────────────────────────────────────┐
+│         Internal Gateway :8081         │
+│       Service Router                   │
+│                                         │
+│  1. Validate JWT token                  │
+│  2. Route by path pattern               │
+│  3. Forward to appropriate service      │
+└─────────────────────────────────────────┘
+    ↓ (🎟️ Forward JWT unchanged)
+┌─────────────────────────────────────────┐
+│    Microservices :8082, :8083, etc.    │
+│       Business Logic                    │
+│                                         │
+│  1. Extract user context from JWT       │
+│  2. Set database session variables      │
+│  3. Execute business logic              │
+│  4. Return response                     │
+└─────────────────────────────────────────┘
+```
+
+### Response Journey
+```
+Service Response (JSON)
+    ↓
+Internal Gateway (passes through unchanged)
+    ↓  
+Auth Gateway (passes through unchanged)
+    ↓
+Client receives identical response
+```
 
 ## Development vs Production
 
 ### Development (Local Docker)
 ```
-Host Machine → BFF :8080 (exposed directly for development)
-All other services → Private network only
+Host Machine → Auth Gateway :8080 → Internal Gateway :8081 → Services :808X
+    🍪              🎟️           🚪            🔓
+ (session)        (JWT)      (route)     (business logic)
 ```
 
 **No Load Balancer Needed Locally:**
-- BFF port 8080 exposed to localhost for testing
-- Direct access: `curl http://localhost:8080/api/users`
+- Auth Gateway port 8080 exposed to localhost for testing
+- Direct access: `curl http://localhost:8080/api/identity/users/me`
+- Auth Gateway orchestrates: cookie → JWT → forward to internal gateway
 - Simplified for development efficiency
 
 ### Production (Cloud)
 ```
-Internet → Load Balancer → BFF (private network)
-All services → Private network only
-No direct host access to any container
+Internet → Load Balancer → Auth Gateway → Internal Gateway → Services
+    🌐           🔀           🎟️      🚪        🔓
+               (SSL)      (orchestrate) (route) (execute)
 ```
 
-**Load Balancer Options by Platform:**
-- **AWS**: Application Load Balancer (ALB) + Target Groups
-- **Google Cloud**: Cloud Load Balancer + Backend Services  
-- **Azure**: Application Gateway + Backend Pools
-- **Kubernetes**: Ingress Controller (nginx, traefik, istio)
-
-### Optional: Local Load Balancer Simulation
-If you want to simulate production behavior locally, you could add:
-- **nginx** container as reverse proxy
-- **traefik** for container discovery
-- **HAProxy** for load balancing
-
-But for development, **direct BFF access is simpler and more efficient**.
 
 ## Container Configuration
 
@@ -153,12 +199,12 @@ spring:
     username: identity_user
     password: identity_password
 
-# Redis connection (BFF only)
+# Redis connection (Auth Gateway only)
   session:
     store-type: redis
   data:
     redis:
-      host: bff-redis
+      host: auth-redis
       port: 6379
 
 # Keycloak configuration
@@ -170,7 +216,7 @@ spring:
 
 # Internal service discovery
 gateway:
-  url: http://gateway:8081
+  url: http://internal-gateway:8081
 ```
 
 ## IntelliJ Services Management
@@ -179,7 +225,7 @@ gateway:
 These will be standalone Docker containers you start manually:
 - **keycloak** - Authentication server (port 8090:8080)
 - **keycloak-db** - PostgreSQL for Keycloak (port 5433:5432)
-- **bff-redis** - Session storage for BFF (port 6379:6379)
+- **auth-redis** - Session storage for Auth Gateway (port 6379:6379)
 - **identity-db** - PostgreSQL for Identity service (port 5434:5432)
 - **transactions-db** - PostgreSQL for Transactions service (port 5435:5432)
 
@@ -211,7 +257,7 @@ docker run -d --name transactions-db --network beaver-network \
   -e POSTGRES_DB=transactions_db -e POSTGRES_USER=transactions_user -e POSTGRES_PASSWORD=transactions_password \
   -p 5435:5432 postgres:16
 
-docker run -d --name bff-redis --network beaver-network \
+docker run -d --name auth-redis --network beaver-network \
   -p 6379:6379 redis:7-alpine
 
 docker run -d --name keycloak --network beaver-network \
@@ -233,8 +279,8 @@ docker run -d --name keycloak --network beaver-network \
    - **bff-web** (public endpoint)
 
 ### 3. Access and Testing
-- **Application Access**: http://localhost:8080 (BFF only)
-- **API Testing**: Use Postman/curl against BFF endpoints
+- **Application Access**: http://localhost:8080 (Auth Gateway only)
+- **API Testing**: Use Postman/curl against Auth Gateway endpoints
 - **Database Access**: Connect via exposed ports for development (5433, 5434, 5435)
 - **Service Logs**: Monitor via IntelliJ Services panel
 

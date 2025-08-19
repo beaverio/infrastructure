@@ -171,3 +171,4 @@ Client → BFF → Gateway → Services → Database
 ```
 
 **This is a clean, JWT-native multi-tenant architecture!** 🚀
+

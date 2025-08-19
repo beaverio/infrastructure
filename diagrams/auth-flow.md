@@ -1,220 +1,165 @@
-# Auth Flow (BFF + Gateway + Keycloak + Services)
+# Authentication Flow Architecture
 
-This document describes the end‑to‑end authentication & authorization flow for our multi‑workspace SaaS:
+## Overview
+This document describes the OAuth2/OpenID Connect authentication flow using Keycloak as the identity provider in a microservices architecture with Auth Gateway pattern for session-to-JWT orchestration.
 
-- **Clients:** Next.js Web, iOS (Swift)
-- **Edge:** **Spring Boot BFF** (only public app entry)
-- **Auth Server:** **Keycloak** (one instance per environment)
-- **Egress:** **Spring Cloud Gateway** (single private egress to backend)
-- **Services:** `identity-service`, `transactions-service` (and others)
-- **State:** **Redis** (BFF sessions + small roles cache)
-- **DB:** **Postgres** with **Row‑Level Security (RLS)** per `workspace_id`
-
----
-
-## High‑Level Principles
-
-- **No tokens in the browser/app.** Clients hold only a **HTTP‑only session cookie**.
-- **BFF owns sessions** and **refresh token**; performs **Token Exchange** to mint short‑lived **workspace‑scoped access tokens**.
-- **Gateway validates & relays** workspace‑scoped JWTs to services.
-- **Services authorize from JWT claims** (`sub`, `workspaceId`, `roles`) and DB enforces **RLS**.
-- **Single egress:** All app API calls are **BFF → Gateway → Services** (no direct service exposure).
-
----
-
-## Networks & Deployment Topology
-
-**Single Private Network:**
-- All containers run in one private Docker network
-- Only BFF exposed to host machine (8080:8080) for development
-- Internal service communication via container DNS names
-- No external access to internal services (Gateway, Keycloak, Services, Databases)
-
-**Local Development Setup:**
-- BFF accessible at `http://localhost:8080` (only exposed service)
-- All other containers communicate internally via private network
-- Simplified networking for development efficiency
-
-**Keycloak:** one instance per environment (dev/test/prod), each with its own DB, issuer URL, clients, secrets.
-
-Example hostnames:
-
-- Prod: `https://auth.example.com/realms/prod`
-- Test: `https://auth.test.example.com/realms/test`
-- Dev: `https://auth.dev.example.com/realms/dev`
-
----
-
-## Sequence Diagram (Login → Token Exchange → Scoped API Call)
+## Authentication Flow Diagram
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant B as BFF
-    participant K as Keycloak
-    participant G as Gateway
-    participant I as Identity Service
-    participant P as PostgreSQL
+    participant User as 👤 User
+    participant AuthGW as 🔐 Auth Gateway
+    participant Keycloak as 🔐 Keycloak
+    participant Redis as ⚡ Session Store
+    participant InternalGW as 🚪 Internal Gateway
+    participant Identity as 👤 Identity Service
+    participant Transactions as 💰 Transactions Service
+    participant IdentityDB as 🗄️ Identity DB
+    participant TransactionsDB as 🗄️ Transactions DB
 
-    Note over C,P: Login & Token Exchange Flow
+    Note over User,TransactionsDB: 1. Sign In Flow with User Context
+    User->>AuthGW: Access protected resource
+    AuthGW-->>User: Redirect to Keycloak login
+    User->>Keycloak: Login with credentials
+    Keycloak-->>User: Auth code callback
+    User->>AuthGW: Callback with auth code
+    AuthGW->>Keycloak: Exchange code for basic JWT (userId only)
+    Keycloak-->>AuthGW: Basic JWT with userId
+    
+    Note over AuthGW,IdentityDB: Get User's Workspace Context
+    AuthGW->>InternalGW: Get user context with basic JWT
+    InternalGW->>Identity: GET /users/me/context
+    Identity->>IdentityDB: SET SESSION 'app.workspace_id' = NULL (admin query)
+    Identity->>IdentityDB: SELECT user, lastWorkspaceId, roles, workspaces FROM users WHERE id = ?
+    IdentityDB-->>Identity: User data + workspace memberships
+    Identity-->>InternalGW: User profile + workspace context
+    InternalGW-->>AuthGW: User context data
+    
+    AuthGW->>Keycloak: Exchange for workspace-scoped JWT (custom claims)
+    Keycloak-->>AuthGW: Final JWT with userId + workspaceId + roles
+    AuthGW->>Redis: Store session + workspace-scoped JWT
+    AuthGW-->>User: Set session cookie
 
-    C->>B: GET /app (no session)
-    B->>K: Redirect to Keycloak OIDC
-    K->>C: Login form
-    C->>K: Credentials
-    K->>B: Authorization code
-    B->>K: Exchange code for tokens
-    K->>B: Access token + refresh token
-    
-    Note over B,I: Get User Context from Identity Service
-    B->>G: GET /identity/users/me (Bearer: access_token)
-    G->I: Forward request with JWT
-    I->>P: SELECT user, lastWorkspaceId, roles FROM users WHERE id = jwt.sub
-    P->>I: User data with workspace context
-    I->>G: User profile + lastWorkspaceId + roles
-    G->>B: User context data
-    
-    Note over B,K: Mint Workspace-Scoped Token
-    B->>K: Token exchange with custom claims
-    Note right of B: Claims: {userId, workspaceId, roles}
-    K->>B: Workspace-scoped JWT
-    
-    Note over B,C: Set Session & Response
-    B->>B: Store session in Redis
-    B->>C: Set HTTP-only cookie + user data
-    
-    Note over C,P: Subsequent API Calls
-    C->>B: API request with cookie
-    B->>G: Proxy with workspace-scoped JWT
-    G->>I: Forward JWT (no header enrichment)
-    I->>I: Extract claims from JWT directly
-    I->>P: SQL with RLS enforcement
-    P->>I: Workspace-filtered data
-    I->>G: Response
-    G->>B: Response
-    B->>C: Response
+    Note over User,TransactionsDB: 2. API Call with Workspace Context
+    User->>AuthGW: GET /api/transactions/recent (cookie)
+    AuthGW->>Redis: Get workspace-scoped JWT from session
+    AuthGW->>InternalGW: Forward with JWT Bearer token
+    InternalGW->>Transactions: Route request with JWT
+    Transactions->>Transactions: Extract workspaceId from JWT
+    Transactions->>TransactionsDB: SET SESSION 'app.workspace_id' = 'workspace-123'
+    Transactions->>TransactionsDB: SELECT * FROM transactions ORDER BY date DESC LIMIT 10
+    Note right of TransactionsDB: RLS: WHERE workspace_id = current_setting('app.workspace_id')
+    TransactionsDB-->>Transactions: Workspace-filtered results
+    Transactions-->>InternalGW: Transaction data
+    InternalGW-->>AuthGW: Pass through
+    AuthGW-->>User: JSON response
 ```
 
----
+## Security Standards Alignment
 
-## Keycloak Setup (per environment)
+### ✅ OAuth2/OpenID Connect Compliance
+- **Authorization Code Flow**: Industry standard for web applications
+- **PKCE Support**: Code challenge/verifier for enhanced security
+- **JWT Tokens**: Stateless, cryptographically signed tokens
+- **Refresh Token Rotation**: Enhanced security with token rotation
+- **Scope-based Authorization**: Fine-grained permission control
 
-Each environment (dev, test, prod) has a **dedicated Keycloak instance** + Postgres DB. 
+### ✅ Zero Trust Architecture
+- **No Direct Service Access**: All services private except Auth Gateway
+- **Token Validation at Internal Gateway**: Central authentication checkpoint
+- **Service-to-Service Authentication**: Internal JWT validation
+- **Session Management**: Server-side session storage in Redis
 
-### Realm
-- Create realm: `dev`, `test`, `prod`.
+### ✅ Security Headers & CORS
+```http
+# Security Headers (Auth Gateway should implement)
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-XSS-Protection: 1; mode=block
+Content-Security-Policy: default-src 'self'
 
-### Clients
-- **bff-web**
-  - Type: confidential
-  - Flow: Authorization Code + Refresh
-  - Redirect URIs: `https://app.dev.example.com/*` (per env)
-  - Token Exchange: enabled
-- **identity-service**
-  - Type: bearer‑only
-  - Audience: `identity-service`
-- **transactions-service**
-  - Type: bearer‑only
-  - Audience: `transactions-service`
+# CORS Configuration
+Access-Control-Allow-Origin: https://yourapp.com
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE
+Access-Control-Allow-Headers: Authorization, Content-Type
+```
 
-### Client Scopes
-- **workspace-context**:
-  - Protocol mappers:
-    - `workspaceId` → claim `workspaceId`
-    - `roles` → claim `roles` (array)
-  - Added on Token Exchange
+## Token Validation Strategy
 
-### Lifetimes
-- **Access Tokens (workspace‑scoped):** 5 minutes
-- **Refresh Tokens:** 12h–24h
-- **BFF Session TTL in Redis:** idle 12h, absolute 7d
+### At Internal Gateway Level
+```yaml
+# Internal Gateway JWT Validation Configuration
+security:
+  oauth2:
+    resourceserver:
+      jwt:
+        issuer-uri: http://keycloak:8090/realms/dev
+        jwk-set-uri: http://keycloak:8090/realms/dev/protocol/openid-connect/certs
+```
 
----
+## Session Management
 
-## BFF (Spring Boot)
+### Auth Gateway Session Strategy
+- **Server-side Sessions**: Stored in Redis for scalability
+- **HTTP-only Cookies**: Prevent XSS attacks
+- **Secure Flag**: HTTPS-only transmission
+- **SameSite**: CSRF protection
+- **Session Timeout**: Configurable expiration
 
-- **Responsibilities**:
-  - Manage user login/logout.
-  - Hold refresh token in Redis.
-  - Store `currentWorkspaceId` in session.
-  - Perform Token Exchange per workspace.
-  - Call Gateway with workspace‑scoped token.
-- **Redis session structure**:
-  ```json
-  {
-    "userId": "abc123",
-    "currentWorkspaceId": "ws456",
-    "refreshToken": "...",
-    "rolesCache": { "ws456": ["owner", "editor"], "exp": "2025-08-20T12:00Z" }
-  }
-  ```
+### Redis Session Store
+- **Session Data**: User ID, current workspace, refresh token, roles cache
+- **TTL**: Idle and absolute expiration times
+- **Connection**: Auth Gateway connects to Redis for session operations
 
----
+### Session Flow
+1. User accesses a protected resource.
+2. Auth Gateway checks for a valid session in Redis.
+3. If no valid session, respond with 401 Unauthorized and redirect to login.
+4. After successful login, store session data in Redis with access and refresh tokens.
+5. Set HTTP-only, Secure, SameSite cookie in the user's browser.
+6. For subsequent requests, Auth Gateway validates the session using the cookie.
+7. If the access token is expired, use the refresh token to obtain a new access token.
+8. Update the session in Redis with the new access token.
 
-## Gateway (Spring Cloud Gateway)
+## Authorization Matrix
+| Role | Identity Service | Transactions Service | Internal Gateway Access |
+|------|-----------------|---------------------|----------------|
+| **user** | Read own profile | Read own transactions | Basic routes |
+| **manager** | Read team profiles | Read team transactions | Manager routes |
+| **admin** | Full access | Full access | All routes |
 
-- **JWT validation** via Spring Security (issuer-uri per env).
-- Global filters:
-  - `TokenRelay`
-  - `RemoveRequestHeader=Cookie`
-- Routes:
-  - `/identity/** → identity-service`
-  - `/transactions/** → transactions-service`
-- Only reachable from BFF’s private network.
+## Development Configuration
 
----
+### Local Environment Variables
+```env
+# Keycloak Configuration
+KEYCLOAK_REALM=dev
+KEYCLOAK_CLIENT_ID=beaver-auth-gateway
+KEYCLOAK_CLIENT_SECRET=your-client-secret
+KEYCLOAK_ISSUER_URL=http://keycloak:8090/realms/dev
 
-## identity-service
+# Session Configuration  
+REDIS_HOST=auth-redis
+REDIS_PORT=6379
+SESSION_TIMEOUT=3600
+COOKIE_SECURE=false
+COOKIE_DOMAIN=localhost
 
-- Resource server; validates JWT `aud=identity-service`.
-- Endpoints:
-  - `GET /me/preferences → { lastWorkspaceId }`
-  - `PATCH /me/preferences { lastWorkspaceId }`
-  - `GET /me/{workspaceId}/roles → [ ... ]`
+# Internal Gateway Configuration
+INTERNAL_GATEWAY_URL=http://internal-gateway:8081
+JWT_VALIDATION_ENABLED=true
+```
 
----
-
-## transactions-service
-
-- Resource server; validates JWT `aud=transactions-service`.
-- Enforces:
-  - Request path workspace == claim `workspaceId`
-  - Method roles via `@PreAuthorize`
-- **Postgres RLS**:
-  - `ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;`
-  - Policy example:
-    ```sql
-    CREATE POLICY ws_isolation ON transactions
-      USING (workspace_id = current_setting('app.workspace_id')::uuid);
-    ```
-  - Spring sets `SET LOCAL app.workspace_id = :jwt.workspaceId` per connection.
-
----
-
-## Redis Usage
-
-- Session store for BFF (Spring Session Redis).
-- Short cache for `(userId, workspaceId) → roles` (TTL ~5m).
-
----
-
-## Postgres Usage
-
-- Separate Postgres DB for:
-  - **Keycloak** (per env).
-  - **App services** (identity, transactions).
-- RLS ensures **defense in depth**; services must pass workspace claim into DB session var.
-
----
-
-## Summary
-
-1. **Clients** only see cookies → safe.
-2. **BFF** manages refresh + workspace context.
-3. **Keycloak** handles login + token exchange.
-4. **Gateway** enforces token validity.
-5. **Services** enforce workspace auth via claims + RLS.
-6. **Redis** caches sessions + roles for efficiency.
-7. **Postgres** enforces final row‑level isolation.
-
-This pattern scales cleanly to dev/test/prod, isolates envs, and provides strong security at each layer.
+### Auth Gateway Implementation Checklist
+- [ ] OAuth2 Authorization Code Flow implementation
+- [ ] Session management with Redis
+- [ ] CSRF protection with SameSite cookies
+- [ ] Token refresh mechanism
+- [ ] Security headers implementation
+- [ ] CORS configuration
+- [ ] Error handling with proper HTTP status codes
+- [ ] Logout functionality with session cleanup
+- [ ] Rate limiting for authentication endpoints
+- [ ] Audit logging for security events
