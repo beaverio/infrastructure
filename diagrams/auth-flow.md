@@ -43,48 +43,50 @@ Example hostnames:
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant C as Client (Web/iOS)
-    participant B as Spring Boot BFF
-    participant R as Redis (Session)
+    participant C as Client
+    participant B as BFF
     participant K as Keycloak
-    participant G as Spring Cloud Gateway
-    participant I as identity-service
-    participant S as transactions-service
-    participant P as Postgres (RLS)
+    participant G as Gateway
+    participant I as Identity Service
+    participant P as PostgreSQL
 
-    %% 1) LOGIN
+    Note over C,P: Login & Token Exchange Flow
+    
     C->>B: GET /app (no session)
-    B->>K: OIDC Authorization Request
-    K-->>C: Login/consent page
-    C->>K: Credentials/consent
-    K-->>B: Authorization Code
-    B->>K: Token request (code)
-    K-->>B: id_token, access_token, refresh_token
-    B->>R: Create session { userId, currentWorkspaceId=null, refreshToken }
-    B-->>C: Set-Cookie app_session (HTTP-only, SameSite)
-
-    %% 2) SEED WORKSPACE (assume identity has lastWorkspaceId)
-    B->>G: GET /identity/me/preferences
-    G->>I: GET /me/preferences
-    I-->>G: { lastWorkspaceId }
-    G-->>B: lastWorkspaceId
-    B->>R: session.currentWorkspaceId = lastWorkspaceId
-
-    %% 3) TOKEN EXCHANGE (workspace-scoped)
-    B->>K: Token Exchange (notes: workspaceId, roles, aud=target)
-    K-->>B: workspace-scoped access_token (TTL ~5m, claims: sub, workspaceId, roles, aud)
-
-    %% 4) SCOPED API CALL
-    C->>B: POST /api/transactions {...} (cookie only)
-    B->>G: POST /transactions/workspaces/{ws}/... (Bearer AT_ws)
-    G->>S: Relay request + Bearer AT_ws
-    S->>S: Validate JWT
-    S->>P: SQL query with RLS bound to claim workspaceId
-    P-->>S: rows
-    S-->>G: 200 OK
-    G-->>B: 200 OK
-    B-->>C: 200 OK
+    B->>K: Redirect to Keycloak OIDC
+    K->>C: Login form
+    C->>K: Credentials
+    K->>B: Authorization code
+    B->>K: Exchange code for tokens
+    K->>B: Access token + refresh token
+    
+    Note over B,I: Get User Context from Identity Service
+    B->>G: GET /identity/users/me (Bearer: access_token)
+    G->>I: Forward request with JWT
+    I->>P: SELECT user, lastWorkspaceId, roles FROM users WHERE id = jwt.sub
+    P->>I: User data with workspace context
+    I->>G: User profile + lastWorkspaceId + roles
+    G->>B: User context data
+    
+    Note over B,K: Mint Workspace-Scoped Token
+    B->>K: Token exchange with custom claims
+    Note right of B: Claims: {userId, workspaceId, roles}
+    K->>B: Workspace-scoped JWT
+    
+    Note over B,C: Set Session & Response
+    B->>B: Store session in Redis
+    B->>C: Set HTTP-only cookie + user data
+    
+    Note over C,P: Subsequent API Calls
+    C->>B: API request with cookie
+    B->>G: Proxy with workspace-scoped JWT
+    G->>I: Forward JWT (no header enrichment)
+    I->>I: Extract claims from JWT directly
+    I->>P: SQL with RLS enforcement
+    P->>I: Workspace-filtered data
+    I->>G: Response
+    G->>B: Response
+    B->>C: Response
 ```
 
 ---
