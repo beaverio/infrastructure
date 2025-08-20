@@ -315,7 +315,7 @@ COOKIE_SECURE=false
 COOKIE_DOMAIN=localhost
 
 # Internal Gateway Configuration
-INTERNAL_GATEWAY_URL=http://internal-gateway:8081
+INTERNAL_GATEWAY_URL=http://internal-gateway:8001
 JWT_VALIDATION_ENABLED=true
 ```
 
