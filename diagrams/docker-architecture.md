@@ -10,10 +10,10 @@ graph LR
         Browsers[🌐 Browsers]
         DevTools[🛠️ Postman, etc.]
     end
-    
+
     subgraph "Private Container Network"
         AuthGateway["🔐 auth-gateway<br/>8080:8080<br/>EXPOSED FOR DEVELOPMENT"]
-        
+
         Keycloak[🔐 keycloak<br/>8090:8080]
         KeycloakDB[(🗄️ keycloak-db<br/>5433:5432<br/>PostgreSQL)]
         AuthRedis[(📦 auth-redis<br/>6379:6379)]
@@ -26,28 +26,28 @@ graph LR
         IdentityDB[(🗄️ identity-db<br/>5434:5432<br/>PostgreSQL)]
         TransactionsDB[(🗄️ transactions-db<br/>5435:5432<br/>PostgreSQL)]
     end
-    
+
     Browsers --> AuthGateway
     DevTools --> AuthGateway
-    
+
     AuthGateway --> Keycloak
     AuthGateway --> InternalGateway
     AuthGateway --> AuthRedis
-    
+
     InternalGateway --> Identity
     InternalGateway --> Transactions
-    
+
     Identity --> IdentityDB
     Transactions --> TransactionsDB
-    
+
     Keycloak --> KeycloakDB
-    
+
     classDef internet fill:#ffebee,color:#c62828
     classDef auth fill:#e8f5e8,color:#2e7d32
     classDef internal fill:#fff3e0,color:#e65100
     classDef database fill:#bbdefb,color:#0d47a1
     classDef cache fill:#ffcdd2,color:#b71c1c
-    
+
     class Browsers,DevTools internet
     class AuthGateway auth
     class Keycloak,InternalGateway,Identity,Transactions internal

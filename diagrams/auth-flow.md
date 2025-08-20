@@ -3,41 +3,45 @@
 ## Overview
 This document describes the OAuth2/OpenID Connect authentication flow using Keycloak as the identity provider in a microservices architecture with Auth Gateway pattern for session-to-JWT orchestration.
 
-## Authentication Flow Diagram
+## Authentication Flow Diagrams
+
+### OAuth2 Sign In Flow with Provider Selection
 
 ```mermaid
 sequenceDiagram
-    participant User as 👤 User
+    participant Client as 👤 Client
     participant AuthGW as 🔐 Auth Gateway
     participant Keycloak as 🔐 Keycloak
     participant Provider as 🌐 OAuth Provider (Google/Apple)
     participant Redis as ⚡ Session Store
     participant InternalGW as 🚪 Internal Gateway
     participant Identity as 👤 Identity Service
-    participant Transactions as 💰 Transactions Service
     participant IdentityDB as 🗄️ Identity DB
-    participant TransactionsDB as 🗄️ Transactions DB
 
-    Note over User,TransactionsDB: 1. OAuth2 Sign In Flow with Provider Selection
-    User->>AuthGW: Access protected resource OR click login
+    Note over Client,IdentityDB: OAuth2 Sign In Flow with Provider Selection
+    Client->>AuthGW: Access protected resource OR click login
     AuthGW->>Redis: Check for existing session
     Redis-->>AuthGW: No session found
-    AuthGW-->>User: Redirect to Keycloak realm
+    AuthGW->>AuthGW: Generate OAuth2 state + redirect URL
+    AuthGW-->>Client: Redirect to Keycloak realm with state
     
-    User->>Keycloak: Access Keycloak login page
-    Keycloak-->>User: Show provider selection (Google, Apple, etc.)
-    User->>Keycloak: Select Google OAuth
-    Keycloak-->>User: Redirect to Google OAuth
+    Client->>Keycloak: Access Keycloak login page
+    Keycloak-->>Client: Show provider selection (Google, Apple, etc.)
+    Client->>Keycloak: Select Google OAuth
+    Keycloak-->>Client: Redirect to Google OAuth (with Keycloak client_id & redirect_uri)
     
-    User->>Provider: Login with Google credentials
-    Provider-->>User: Redirect to Keycloak callback with auth code
-    User->>Keycloak: Google auth code + user profile
-    Keycloak->>Keycloak: Create/update user from Google profile
-    Keycloak-->>User: Redirect to Auth Gateway with authorization code
+    Client->>Provider: Login with Google credentials
+    Provider->>Provider: Authenticate user
+    Provider-->>Client: Redirect to Keycloak callback with provider authorization code
+    Client->>Keycloak: Keycloak callback with provider authorization code
+    Keycloak->>Provider: Exchange provider authorization code for user profile
+    Provider-->>Keycloak: User profile data (email, name, etc.)
+    Keycloak->>Keycloak: Create/update user from provider profile
+    Keycloak-->>Client: Redirect to Auth Gateway callback with Keycloak authorization code
     
-    Note over AuthGW,TransactionsDB: 2. Authorization Code Exchange & Context Building
-    User->>AuthGW: Callback with Keycloak authorization code
-    AuthGW->>Keycloak: Exchange auth code for tokens
+    Client->>AuthGW: Auth Gateway callback with Keycloak authorization code + state
+    AuthGW->>AuthGW: Validate state parameter
+    AuthGW->>Keycloak: Exchange authorization code for tokens
     Keycloak-->>AuthGW: Access token + ID token + Refresh token (basic claims)
     
     Note over AuthGW,IdentityDB: Get User's Workspace Context
@@ -53,10 +57,23 @@ sequenceDiagram
     Keycloak-->>AuthGW: Workspace-scoped JWT with userId + workspaceId + roles
     AuthGW->>Redis: Store session (JWT + refresh token + expiry + user context)
     Note right of Redis: Session TTL: 24 hours idle, 7 days absolute
-    AuthGW-->>User: Set HTTP-only session cookie
+    AuthGW-->>Client: Set HTTP-only session cookie + redirect to original resource
+```
 
-    Note over User,TransactionsDB: 3. API Call with Workspace Context
-    User->>AuthGW: GET /api/transactions/recent (session cookie)
+### API Call with Workspace Context
+
+```mermaid
+sequenceDiagram
+    participant Client as 👤 Client
+    participant AuthGW as 🔐 Auth Gateway
+    participant Keycloak as 🔐 Keycloak
+    participant Redis as ⚡ Session Store
+    participant InternalGW as 🚪 Internal Gateway
+    participant Transactions as 💰 Transactions Service
+    participant TransactionsDB as 🗄️ Transactions DB
+
+    Note over Client,TransactionsDB: 1. API Call with Workspace Context
+    Client->>AuthGW: GET /api/transactions/recent (session cookie)
     AuthGW->>Redis: Get session data by cookie
     Redis-->>AuthGW: Session data + workspace-scoped JWT
     AuthGW->>AuthGW: Check if JWT is expired
@@ -73,18 +90,18 @@ sequenceDiagram
     InternalGW->>Transactions: Route request with JWT
     Transactions->>Transactions: Extract workspaceId from JWT claims
     Transactions->>TransactionsDB: SET SESSION 'app.workspace_id' = 'workspace-123'
-    Transactions->>TransactionsDB: SELECT * FROM transactions ORDER BY date DESC LIMIT 10
+    Transactions->>TransactionsDB: SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10
     Note right of TransactionsDB: RLS: WHERE workspace_id = current_setting('app.workspace_id')
     TransactionsDB-->>Transactions: Workspace-filtered results
     Transactions-->>InternalGW: Transaction data
     InternalGW-->>AuthGW: Pass through response
-    AuthGW-->>User: JSON response
+    AuthGW-->>Client: JSON response
 
-    Note over User,TransactionsDB: 4. Session Expiry Handling
-    User->>AuthGW: API call after session expires
+    Note over Client,TransactionsDB: 2. Session Expiry Handling
+    Client->>AuthGW: API call after session expires
     AuthGW->>Redis: Check session
     Redis-->>AuthGW: Session expired or not found
-    AuthGW-->>User: 401 Unauthorized + redirect to login
+    AuthGW-->>Client: 401 Unauthorized + redirect to login
 ```
 
 ## Security Standards Alignment
@@ -131,29 +148,27 @@ security:
         jwk-set-uri: http://keycloak:8090/realms/dev/protocol/openid-connect/certs
 ```
 
-## Session Management
-
-### Auth Gateway Session Strategy
-- **Server-side Sessions**: Stored in Redis for scalability
-- **HTTP-only Cookies**: Prevent XSS attacks
-- **Secure Flag**: HTTPS-only transmission
-- **SameSite**: CSRF protection
-- **Session Timeout**: Configurable expiration
-
-### Redis Session Store
-- **Session Data**: User ID, current workspace, refresh token, roles cache
-- **TTL**: Idle and absolute expiration times
-- **Connection**: Auth Gateway connects to Redis for session operations
-
-### Session Flow
-1. User accesses a protected resource.
-2. Auth Gateway checks for a valid session in Redis.
-3. If no valid session, respond with 401 Unauthorized and redirect to login.
-4. After successful login, store session data in Redis with access and refresh tokens.
-5. Set HTTP-only, Secure, SameSite cookie in the user's browser.
-6. For subsequent requests, Auth Gateway validates the session using the cookie.
-7. If the access token is expired, use the refresh token to obtain a new access token.
-8. Update the session in Redis with the new access token.
+### Token Structure
+```json
+{
+  "header": {
+    "alg": "RS256",
+    "typ": "JWT",
+    "kid": "keycloak-key-id"
+  },
+  "payload": {
+    "exp": 1723123456,
+    "iat": 1723120456,
+    "iss": "http://keycloak:8090/realms/dev",
+    "sub": "user-uuid",
+    "preferred_username": "john.doe",
+    "email": "john@example.com",
+    "workspaceId": "workspace-123",
+    "roles": ["user", "manager"],
+    "scope": "openid profile email"
+  }
+}
+```
 
 ## Session Management & Token Lifecycle
 
@@ -196,46 +211,36 @@ When a request comes in with a session cookie:
 - **Logout**: Explicit session deletion from Redis + Keycloak logout
 - **Token Revocation**: Refresh tokens revoked on logout for security
 
-## Authorization Matrix
+## Role-Based Access Control (RBAC)
+
+### Keycloak Configuration
+```json
+{
+  "realm": "dev",
+  "clients": [{
+    "clientId": "beaver-auth-gateway",
+    "clientAuthenticatorType": "client-secret",
+    "redirectUris": ["http://localhost:8080/callback"],
+    "webOrigins": ["http://localhost:3000"],
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": false
+  }],
+  "roles": {
+    "realm": ["admin", "user", "manager"],
+    "client": {
+      "beaver-auth-gateway": ["transactions:read", "transactions:write", "users:read"]
+    }
+  }
+}
+```
+
+### Authorization Matrix
 | Role | Identity Service | Transactions Service | Internal Gateway Access |
 |------|-----------------|---------------------|----------------|
 | **user** | Read own profile | Read own transactions | Basic routes |
 | **manager** | Read team profiles | Read team transactions | Manager routes |
 | **admin** | Full access | Full access | All routes |
-
-## Development Configuration
-
-### Local Environment Variables
-```env
-# Keycloak Configuration
-KEYCLOAK_REALM=dev
-KEYCLOAK_CLIENT_ID=beaver-auth-gateway
-KEYCLOAK_CLIENT_SECRET=your-client-secret
-KEYCLOAK_ISSUER_URL=http://keycloak:8090/realms/dev
-
-# Session Configuration  
-REDIS_HOST=auth-redis
-REDIS_PORT=6379
-SESSION_TIMEOUT=3600
-COOKIE_SECURE=false
-COOKIE_DOMAIN=localhost
-
-# Internal Gateway Configuration
-INTERNAL_GATEWAY_URL=http://internal-gateway:8081
-JWT_VALIDATION_ENABLED=true
-```
-
-### Auth Gateway Implementation Checklist
-- [ ] OAuth2 Authorization Code Flow implementation
-- [ ] Session management with Redis
-- [ ] CSRF protection with SameSite cookies
-- [ ] Token refresh mechanism
-- [ ] Security headers implementation
-- [ ] CORS configuration
-- [ ] Error handling with proper HTTP status codes
-- [ ] Logout functionality with session cleanup
-- [ ] Rate limiting for authentication endpoints
-- [ ] Audit logging for security events
 
 ## API Request Flow Details
 
@@ -291,4 +296,37 @@ HTTP/1.1 401 Unauthorized
 - Auth Gateway automatically refreshes token
 - Client receives normal response
 - Session `lastAccessedAt` updated to extend idle timeout
+
+## Development Configuration
+
+### Local Environment Variables
+```env
+# Keycloak Configuration
+KEYCLOAK_REALM=dev
+KEYCLOAK_CLIENT_ID=beaver-auth-gateway
+KEYCLOAK_CLIENT_SECRET=your-client-secret
+KEYCLOAK_ISSUER_URL=http://keycloak:8090/realms/dev
+
+# Session Configuration  
+REDIS_HOST=auth-redis
+REDIS_PORT=6379
+SESSION_TIMEOUT=3600
+COOKIE_SECURE=false
+COOKIE_DOMAIN=localhost
+
+# Internal Gateway Configuration
+INTERNAL_GATEWAY_URL=http://internal-gateway:8081
+JWT_VALIDATION_ENABLED=true
 ```
+
+### Auth Gateway Implementation Checklist
+- [ ] OAuth2 Authorization Code Flow implementation
+- [ ] Session management with Redis
+- [ ] CSRF protection with SameSite cookies
+- [ ] Token refresh mechanism
+- [ ] Security headers implementation
+- [ ] CORS configuration
+- [ ] Error handling with proper HTTP status codes
+- [ ] Logout functionality with session cleanup
+- [ ] Rate limiting for authentication endpoints
+- [ ] Audit logging for security events
