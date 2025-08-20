@@ -12,19 +12,19 @@ graph LR
     end
 
     subgraph "Private Container Network"
-        AuthGateway["🔐 auth-gateway<br/>8080:8080<br/>EXPOSED FOR DEVELOPMENT"]
+        AuthGateway["🔐 auth-gateway<br/>8000:8000<br/>EXPOSED FOR DEVELOPMENT"]
 
-        Keycloak[🔐 keycloak<br/>8090:8080]
-        KeycloakDB[(🗄️ keycloak-db<br/>5433:5432<br/>PostgreSQL)]
+        Keycloak[🔐 keycloak<br/>8080:8080]
+        KeycloakDB[(🗄️ keycloak-db<br/>5432:5432<br/>PostgreSQL)]
         AuthRedis[(📦 auth-redis<br/>6379:6379)]
 
-        InternalGateway[🚪 internal-gateway<br/>:8081<br/>INTERNAL ONLY]
+        InternalGateway[🚪 internal-gateway<br/>8001:8001<br/>INTERNAL ONLY]
 
-        Identity[👤 identity-service<br/>:8082<br/>INTERNAL ONLY]
-        Transactions[💰 transactions-service<br/>:8083<br/>INTERNAL ONLY]
+        Identity[👤 identity-service<br/>8002:8002<br/>INTERNAL ONLY]
+        Transactions[💰 transactions-service<br/>8003:8003<br/>INTERNAL ONLY]
 
-        IdentityDB[(🗄️ identity-db<br/>5434:5432<br/>PostgreSQL)]
-        TransactionsDB[(🗄️ transactions-db<br/>5435:5432<br/>PostgreSQL)]
+        IdentityDB[(🗄️ identity-db<br/>5433:5432<br/>PostgreSQL)]
+        TransactionsDB[(🗄️ transactions-db<br/>5434:5432<br/>PostgreSQL)]
     end
 
     Browsers --> AuthGateway
@@ -61,11 +61,11 @@ graph LR
 - **Docker**: All containers run in one custom Docker bridge network with internal DNS resolution
 - **Container isolation**: Only containers in the same network can communicate with each other
 - **No external access**: Internal containers have no published ports to host machine
-- **DNS resolution**: Containers communicate using container names (e.g., `http://keycloak:8090`)
+- **DNS resolution**: Containers communicate using container names (e.g., `http://keycloak:8080`)
 (AWS equivalent: VPC with private subnets)
 
 ### Auth Gateway (Authentication Orchestration Layer)
-- **Docker**: Single container with published port mapping `8080:8080` to host machine
+- **Docker**: Single container with published port mapping `8000:8000` to host machine
 - **External access**: Only this container is reachable from outside Docker network
 - **Authentication role**: Converts session cookies to JWT tokens and manages auth state
 - **Pass-through pattern**: Forwards authenticated requests to Internal Gateway
@@ -74,9 +74,9 @@ graph LR
 (AWS equivalent: Application Load Balancer + ECS Task in public subnet)
 
 ### Internal Gateway (Service Routing Hub)
-- **Docker**: Container with no published ports - internal access only via `internal-gateway:8081`
+- **Docker**: Container with no published ports - internal access only via `internal-gateway:8001`
 - **Routing responsibility**: Receives JWT-authenticated requests from Auth Gateway and routes to services
-- **Service discovery**: Uses Docker DNS to forward requests to `identity:8082`, `transactions:8083`, etc.
+- **Service discovery**: Uses Docker DNS to forward requests to `identity:8002`, `transactions:8003`, etc.
 - **Token validation**: Validates JWT tokens before forwarding to downstream services
 - **Path-based routing**: Routes based on URL patterns (e.g., `/identity/*` → Identity Service)
 
@@ -95,7 +95,7 @@ graph LR
 Client Request (🍪 session cookie)
     ↓
 ┌─────────────────────────────────────────┐
-│           Auth Gateway :8080          │
+│           Auth Gateway :8000          │
 │    Authentication Orchestrator         │
 │                                         │
 │  1. Extract session from Redis          │
@@ -105,7 +105,7 @@ Client Request (🍪 session cookie)
 └─────────────────────────────────────────┘
     ↓ (🎟️ JWT Bearer token)
 ┌────────────────────���────────────────────┐
-│         Internal Gateway :8081         │
+│         Internal Gateway :8001         │
 │       Service Router                   │
 │                                         │
 │  1. Validate JWT token                  │
@@ -114,7 +114,7 @@ Client Request (🍪 session cookie)
 └─────���───────────────────────────────────┘
     ↓ (🎟️ Forward JWT unchanged)
 ┌─────────────────────────────────────────┐
-│    Microservices :8082, :8083, etc.    │
+│    Microservices :8002, :8003, etc.    │
 │       Business Logic                    │
 │                                         │
 │  1. Extract user context from JWT       │
@@ -139,14 +139,14 @@ Client receives identical response
 
 ### Development (Local Docker)
 ```
-Host Machine → Auth Gateway :8080 → Internal Gateway :8081 → Services :808X
+Host Machine → Auth Gateway :8000 → Internal Gateway :8001 → Services :800X
     🍪              🎟️           🚪            🔓
  (session)        (JWT)      (route)     (business logic)
 ```
 
 **No Load Balancer Needed Locally:**
-- Auth Gateway port 8080 exposed to localhost for testing
-- Direct access: `curl http://localhost:8080/api/identity/users/me`
+- Auth Gateway port 8000 exposed to localhost for testing
+- Direct access: `curl http://localhost:8000/api/identity/users/me`
 - Auth Gateway orchestrates: cookie → JWT → forward to internal gateway
 - Simplified for development efficiency
 
